@@ -6,6 +6,7 @@ import random
 import numpy as np
 import tensorflow as tf
 from collections import deque
+import scipy.misc
 from skimage.color import rgb2gray
 from skimage.transform import resize
 from keras.models import Sequential
@@ -14,13 +15,13 @@ from keras.layers import Convolution2D, Flatten, Dense
 import argparse
 parser = argparse.ArgumentParser(description='Process some integers.')
 parser.add_argument('--gamma', dest='gamma', type=float, default=.99, help='Discount factor for RL agent')
-parser.add_argument('--epsilon', dest='epsilon', type=float, default=.05, help='Exploration parameter for e-greedy')
+# parser.add_argument('--epsilon', dest='epsilon', type=float, default=.05, help='Exploration parameter for e-greedy')
 parser.add_argument('--initial_replay', dest='initial_replay_size', type=int, default=20000, help='replay buffersize')
 
-parser.add_argument('--env', dest='env_name', type=str, default="Breakout-v0", help='Selected enviroment from the openAI gym')
+parser.add_argument('--env', dest='env_name', type=str, default="Seaquest-v0", help='Selected enviroment from the openAI gym')
 parser.add_argument('--device', dest='device', type=str, default='/cpu:0', help='device to use')
 
-parser.add_argument('--results', dest='results_file', type=str, default='episodes.txt', help='Destination to save results')
+parser.add_argument('--results', dest='results_file', type=str, default='-episodes.txt', help='Destination to save results')
 parser.add_argument('--verbose', dest='verbose', type=bool, default=False, help='If verbose flag is on, print too much stuff')
 parser.add_argument('--debug', dest='debug', type=bool, default=False, help='If debug flag is on, print error message')
 parser.add_argument('--render', dest='render', type=bool, default=False, help='Render the gameplay to the monitor')
@@ -34,17 +35,39 @@ parser.add_argument('--fear_linear', dest='fear_linear', type=float, default=100
 parser.add_argument('--fear_warmup', dest='fear_warmup', type=int, default=20000, help='How many experiences before applying the intrinsic fear')
 
 
+parser.add_argument('--debuglife', dest='debuglife', type=bool, default=False, help='If debuglife flag is on, print lives remaining')
+parser.add_argument('--debugfear', dest='debugfear', type=bool, default=False, help='If debuglife flag is on, print error message')
+
+parser.add_argument('--suffix', dest='suffix',       type=str, default='2', help='unique file suffix')
+
+global_num_ep = 0
+CALC_EVERY_X_EPS = 1000
 
 config = parser.parse_args()
 
-results_file = "results/" + config.results_file
-results_full_file = "results/" + "full-" + config.results_file
+suffix = '-' + config.suffix
+result_fr = "-fr-" + str(config.fear_radius)
+result_ff = "-ff-" + str(config.fear_factor)
 
+results_extension = config.env_name + result_fr + result_ff + suffix
+
+results_file = "results/" + results_extension + config.results_file
+results_full_file = "results/" + results_extension + "-full" + config.results_file
+results_detailed_file = "results/" + results_extension + "-detailed" + config.results_file
+
+with open(results_file, "w") as f:
+  f.write("total_reward,iteration\n")
+
+with open(results_full_file, "w") as f:
+  f.write("total_reward,self.t,AVG_MAX_Q\n")
+
+with open(results_detailed_file, "w") as f:
+  f.write("EPISODE,TIMESTEP,DURATION,EPSILON,TOTAL_REWARD,AVG_MAX_Q,AVG_LOSS,MODE,FEAR\n")
 
 ENV_NAME = config.env_name  # Environment name
 FRAME_WIDTH = 84  # Resized frame width
 FRAME_HEIGHT = 84  # Resized frame height
-NUM_EPISODES = 20000  # Number of episodes the agent plays
+NUM_EPISODES = 1000000  # Number of episodes the agent plays
 STATE_LENGTH = 4  # Number of most recent frames to produce the input to the network
 GAMMA = 0.99  # Discount factor
 EXPLORATION_STEPS = 1000000  # Number of steps over which the initial value of epsilon is linearly annealed to its final value
@@ -59,12 +82,12 @@ LEARNING_RATE = 0.00025  # Learning rate used by RMSProp
 FEAR_LEARNING_RATE = .00025  # Learning rate used by RMSProp
 MOMENTUM = 0.95  # Momentum used by RMSProp
 MIN_GRAD = 0.01  # Constant added to the squared gradient in the denominator of the RMSProp update
-SAVE_INTERVAL = 300000  # The frequency with which the network is saved
+SAVE_INTERVAL = 200000  # The frequency with which the network is saved
 NO_OP_STEPS = 30  # Maximum number of "do nothing" actions to be performed by the agent at the start of an episode
 LOAD_NETWORK = False
 TRAIN = True
-SAVE_NETWORK_PATH = 'saved_networks/' + ENV_NAME
-SAVE_SUMMARY_PATH = 'summary/' + ENV_NAME
+SAVE_NETWORK_PATH = 'saved_networks/' + results_extension + '-' + ENV_NAME
+SAVE_SUMMARY_PATH = 'summary/' + results_extension + '-' + ENV_NAME
 NUM_EPISODES_AT_TEST = 30  # Number of episodes the agent plays at test time
 
 
@@ -215,7 +238,7 @@ class Agent():
 
     def get_initial_state(self, observation, last_observation):
         processed_observation = np.maximum(observation, last_observation)
-        processed_observation = np.uint8(resize(rgb2gray(processed_observation), (FRAME_WIDTH, FRAME_HEIGHT)) * 255)
+        processed_observation = np.uint8(resize(rgb2gray(processed_observation), (FRAME_WIDTH, FRAME_HEIGHT)) * 255,mode = 'constant')
         state = [processed_observation for _ in range(STATE_LENGTH)]
         return np.stack(state, axis=0)
 
@@ -225,9 +248,15 @@ class Agent():
             if config.debug:
                 print("evaluating fear model")
             fear_score = self.fear_scores.eval(feed_dict={self.fear_s: np.float32(np.array([state]) / 255.0)})[0,0]
-            if config.verbose:
-                print(fear_score)
+            # if config.verbose:
+            if config.debugfear:
+                if (global_num_ep % CALC_EVERY_X_EPS == 0):
+                    with open('debug_fear_score.txt', "a") as f:
+                        # print("fear_score = {}".format(fear_score))
+                        f.write('{},{}\n'.format(global_num_ep, fear_score))
             self.avg_fear = self.avg_fear *.99 + fear_score * .01
+            # if config.debugfear:
+                # print("self.avg_fear = {}".format(self.avg_fear))
         else:
             fear_score = None
 
@@ -299,7 +328,16 @@ class Agent():
                 self.episode + 1, self.t, self.duration, self.epsilon,
                 self.total_reward, self.total_q_max / float(self.duration),
                 self.total_loss / (float(self.duration) / float(TRAIN_INTERVAL)), mode, self.avg_fear))
-
+            with open(results_detailed_file, "a") as f:
+              f.write("%s,%s,%s,%s,%s,%s,%s,%s,%s\n" % (self.episode + 1,
+                                                        self.t,
+                                                        self.duration,
+                                                        self.epsilon,
+                                                        self.total_reward,
+                                                        self.total_q_max / float(self.duration),
+                                                        self.total_loss / (float(self.duration) / float(TRAIN_INTERVAL)),
+                                                        mode,
+                                                        self.avg_fear))
             with open(results_full_file, "a") as f:
                 #f.write("%s, %s, %s, %s, %s, %s, %s, %s" % (self.episode+1, self.t, self.duration, self.epsilon, self.total_reward, self.total_q_max/float(self.duration), self.total_loss / (float(self.duration) / float(TRAIN_INTERVAL)), mode))
                 f.write("" + str(self.total_reward) + "," + str(self.t) + "," + str(self.total_q_max/float(self.duration)) + "\n")
@@ -338,7 +376,7 @@ class Agent():
         if config.fear_on and (self.t > config.fear_warmup):
             adjusted_fear_factor = np.min([config.fear_factor * float(self.t)/config.fear_linear, config.fear_factor])
             fear_penalty = (1 - terminal_batch) * adjusted_fear_factor * np.max(self.fear_scores.eval(feed_dict={self.fear_s: np.float32(np.array(next_state_batch) / 255.0)}), axis=1) + terminal_batch * 10 * adjusted_fear_factor
-            print("fear factor", adjusted_fear_factor, "fear penalty:", fear_penalty)
+            # print("fear factor", adjusted_fear_factor, "fear penalty:", fear_penalty)
             y_batch = reward_batch + (1 - terminal_batch) * GAMMA * np.max(target_q_values_batch, axis=1) - fear_penalty
         else:
             y_batch = reward_batch + (1 - terminal_batch) * GAMMA * np.max(target_q_values_batch, axis=1)
@@ -408,7 +446,7 @@ class Agent():
 
 def preprocess(observation, last_observation):
     processed_observation = np.maximum(observation, last_observation)
-    processed_observation = np.uint8(resize(rgb2gray(processed_observation), (FRAME_WIDTH, FRAME_HEIGHT)) * 255)
+    processed_observation = np.uint8(resize(rgb2gray(processed_observation), (FRAME_WIDTH, FRAME_HEIGHT)) * 255,mode = 'constant')
     return np.reshape(processed_observation, (1, FRAME_WIDTH, FRAME_HEIGHT))
 
 
@@ -422,38 +460,58 @@ if TRAIN:  # Train mode
     #   Outer loop over episodes
     ########################################################################
     iteration = 0
-    results_file = "results/" + config.results_file
-    for _ in range(NUM_EPISODES):
+    # results_file = "results/" + config.results_file
+    for num_ep in range(NUM_EPISODES):
+        global_num_ep = num_ep
         total_reward = 0
         episode_observations = []
         terminal = False
+        life_count = None
         observation = env.reset()
+        iteration+=1
+        if (num_ep % CALC_EVERY_X_EPS == 0 and iteration % 2 == 0): scipy.misc.toimage(observation).save('test/{}_{}.png'.format(num_ep, iteration))
         for _ in range(random.randint(1, NO_OP_STEPS)):
             last_observation = observation
-            observation, _, _, _ = env.step(0)  # Do nothing
+            observation, _, _, info = env.step(0)  # Do nothing
+            if (num_ep % CALC_EVERY_X_EPS == 0 and iteration % 2 == 0): scipy.misc.toimage(observation).save('test/{}_{}.png'.format(num_ep, iteration))
+            iteration+=1
+        # Number of lives episode begins with
+        life_count = info["ale.lives"]
+        if config.debuglife:
+          print("Initial Life Count = {}".format(life_count))
         state = agent.get_initial_state(observation, last_observation)
         while not terminal:
-            iteration += 1
-            last_observation = observation
-            action = agent.get_action(state)
-            observation, reward, terminal, _ = env.step(action)
-            total_reward += reward
-            if config.render:
-                env.render()
-            processed_observation = preprocess(observation, last_observation)
-            state = agent.run(state, action, reward, terminal, processed_observation)
-            if not terminal:
-                episode_observations.append(state)
-
-        if terminal:
-            if config.fear_on:
-                agent.log_danger(episode_observations[-config.fear_radius:])
-                agent.log_safe(episode_observations[:-config.fear_radius])
-
-                for e in episode_observations:
-                    del e
-                del episode_observations
-                episode_observations = []
+          terminal_life = False
+          while not terminal_life and not terminal:
+              iteration += 1
+              last_observation = observation
+              action = agent.get_action(state)
+              observation, reward, terminal, info = env.step(action)
+              if (num_ep % CALC_EVERY_X_EPS == 0 and iteration % 2 == 0): scipy.misc.toimage(observation).save('test/{}_{}.png'.format(num_ep, iteration))
+              # print(info["ale.lives"])
+              # intermediate termination from life lost or end of episode
+              if info["ale.lives"] < life_count or terminal:
+                life_count = info["ale.lives"]
+                terminal_life = True
+                if config.debuglife:
+                  print("Lost a life. {} lives remaining".format(life_count))
+              total_reward += reward
+              if config.render:
+                  env.render()
+              processed_observation = preprocess(observation, last_observation)
+              state = agent.run(state, action, reward, terminal, processed_observation)
+              if not terminal_life:
+                  episode_observations.append(state)
+  
+          if terminal_life or terminal:
+              if config.fear_on:
+                  agent.log_danger(episode_observations[-config.fear_radius:])
+                  agent.log_safe(episode_observations[:-config.fear_radius])
+  
+                  for e in episode_observations:
+                      del e
+                  del episode_observations
+                  episode_observations = []
 
         with open(results_file, "a") as f:
             f.write(str(total_reward) + "," + str(iteration) + "\n")
